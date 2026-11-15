@@ -47,10 +47,14 @@ export class TmdbClientService {
     return response.data;
   }
 
-  async getPopularMovies(page: number, language?: string): Promise<any> {
-    const url = `${this.baseUrl}/movie/popular`;
-    this.logger.log(`Fetching popular movies page ${page} from TMDb`);
-    
+  private async fetchMovieList(
+    endpoint: 'popular' | 'now_playing' | 'top_rated',
+    page: number,
+    language?: string,
+  ): Promise<any> {
+    const url = `${this.baseUrl}/movie/${endpoint}`;
+    this.logger.log(`Fetching ${endpoint} movies page ${page} from TMDb`);
+
     const response = await firstValueFrom(
       this.httpService.get(url, {
         headers: this.getHeaders(),
@@ -61,34 +65,24 @@ export class TmdbClientService {
         },
       }).pipe(
         catchError((error) => {
-          this.logger.error(`Failed to fetch popular page ${page}: ${error.message}`);
-          throw new HttpException('TMDb popular movies fetch failed', HttpStatus.BAD_GATEWAY);
+          this.logger.error(`Failed to fetch ${endpoint} page ${page}: ${error.message}`);
+          throw new HttpException(`TMDb ${endpoint} movies fetch failed`, HttpStatus.BAD_GATEWAY);
         }),
       ),
     );
     return response.data;
   }
 
+  async getPopularMovies(page: number, language?: string): Promise<any> {
+    return this.fetchMovieList('popular', page, language);
+  }
+
   async getNowPlayingMovies(page: number, language?: string): Promise<any> {
-    const url = `${this.baseUrl}/movie/now_playing`;
-    this.logger.log(`Fetching now playing movies page ${page} from TMDb`);
-    
-    const response = await firstValueFrom(
-      this.httpService.get(url, {
-        headers: this.getHeaders(),
-        params: {
-          page,
-          language: language ?? this.language,
-          region: this.region,
-        },
-      }).pipe(
-        catchError((error) => {
-          this.logger.error(`Failed to fetch now playing page ${page}: ${error.message}`);
-          throw new HttpException('TMDb now playing fetch failed', HttpStatus.BAD_GATEWAY);
-        }),
-      ),
-    );
-    return response.data;
+    return this.fetchMovieList('now_playing', page, language);
+  }
+
+  async getTopRatedMovies(page: number, language?: string): Promise<any> {
+    return this.fetchMovieList('top_rated', page, language);
   }
 
   async getMovieDetails(tmdbId: number, language?: string): Promise<any> {

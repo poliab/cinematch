@@ -10,6 +10,7 @@ export class TmdbSyncService {
   private readonly logger = new Logger(TmdbSyncService.name);
   private readonly popularPages: number;
   private readonly nowPlayingPages: number;
+  private readonly topRatedPages: number;
   private isSyncing = false;
 
   constructor(
@@ -20,6 +21,7 @@ export class TmdbSyncService {
   ) {
     this.popularPages = this.configService.get<number>('sync.popularPages') ?? 5;
     this.nowPlayingPages = this.configService.get<number>('sync.nowPlayingPages') ?? 3;
+    this.topRatedPages = this.configService.get<number>('sync.topRatedPages') ?? 60;
   }
 
   async syncGenres(): Promise<{ total: number }> {
@@ -47,8 +49,9 @@ export class TmdbSyncService {
 
   @Cron(process.env.SYNC_POPULAR_CRON || '0 */6 * * *')
   async handleScheduledPopularSync() {
+    const isSyncEnabled = this.configService.get<boolean>('sync.enabled') ?? true;
     const isCronEnabled = this.configService.get<boolean>('sync.cronEnabled') ?? true;
-    if (!isCronEnabled) {
+    if (!isSyncEnabled || !isCronEnabled) {
       this.logger.log('Scheduled popular TMDb Sync is disabled by configuration.');
       return;
     }
@@ -58,8 +61,9 @@ export class TmdbSyncService {
 
   @Cron(process.env.SYNC_NOW_PLAYING_CRON || '0 */12 * * *')
   async handleScheduledNowPlayingSync() {
+    const isSyncEnabled = this.configService.get<boolean>('sync.enabled') ?? true;
     const isCronEnabled = this.configService.get<boolean>('sync.cronEnabled') ?? true;
-    if (!isCronEnabled) {
+    if (!isSyncEnabled || !isCronEnabled) {
       this.logger.log('Scheduled now playing TMDb Sync is disabled by configuration.');
       return;
     }
@@ -68,6 +72,11 @@ export class TmdbSyncService {
   }
 
   async triggerIfStale(): Promise<{ triggered: boolean; reason: string }> {
+    const isSyncEnabled = this.configService.get<boolean>('sync.enabled') ?? true;
+    if (!isSyncEnabled) {
+      return { triggered: false, reason: 'sync_disabled' };
+    }
+
     const STALE_THRESHOLD_MS = 2 * 60 * 60 * 1000; 
 
     const lastJob = await this.prisma.syncJob.findFirst({
@@ -102,8 +111,24 @@ export class TmdbSyncService {
     return { triggered: false, reason: 'data_fresh' };
   }
 
+  private getPageCount(type: 'popular' | 'now_playing' | 'top_rated'): number {
+    if (type === 'popular') return this.popularPages;
+    if (type === 'top_rated') return this.topRatedPages;
+    return this.nowPlayingPages;
+  }
+
+  private fetchMoviesByType(
+    type: 'popular' | 'now_playing' | 'top_rated',
+    page: number,
+    language: string,
+  ): Promise<any> {
+    if (type === 'popular') return this.tmdbClient.getPopularMovies(page, language);
+    if (type === 'top_rated') return this.tmdbClient.getTopRatedMovies(page, language);
+    return this.tmdbClient.getNowPlayingMovies(page, language);
+  }
+
   async runSync(
-    type: 'popular' | 'now_playing',
+    type: 'popular' | 'now_playing' | 'top_rated',
     triggeredBy: 'schedule' | 'admin' = 'admin',
   ): Promise<any> {
     this.logger.log(`Starting movie sync: type=${type}, triggeredBy=${triggeredBy}`);
@@ -119,7 +144,7 @@ export class TmdbSyncService {
       },
     });
 
-    const totalPages = type === 'popular' ? this.popularPages : this.nowPlayingPages;
+    const totalPages = this.getPageCount(type);
     let itemsProcessed = 0;
     let itemsFailed = 0;
 
@@ -130,12 +155,8 @@ export class TmdbSyncService {
 
       for (let page = 1; page <= totalPages; page++) {
         const [rawResUk, rawResEn] = await Promise.all([
-          type === 'popular'
-            ? this.tmdbClient.getPopularMovies(page, 'uk-UA')
-            : this.tmdbClient.getNowPlayingMovies(page, 'uk-UA'),
-          type === 'popular'
-            ? this.tmdbClient.getPopularMovies(page, 'en-US')
-            : this.tmdbClient.getNowPlayingMovies(page, 'en-US'),
+          this.fetchMoviesByType(type, page, 'uk-UA'),
+          this.fetchMoviesByType(type, page, 'en-US'),
         ]);
 
         if (!rawResUk || !rawResUk.results) {

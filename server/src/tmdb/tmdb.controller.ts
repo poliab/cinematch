@@ -11,7 +11,7 @@ export class TmdbController {
   constructor(private readonly tmdbSyncService: TmdbSyncService) {}
 
   @Post()
-  async triggerSync(@Body() body: { type?: 'popular' | 'now_playing' }) {
+  async triggerSync(@Body() body: { type?: 'popular' | 'now_playing' | 'top_rated' }) {
     const type = body.type ?? 'popular';
     return this.tmdbSyncService.runSync(type);
   }

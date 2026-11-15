@@ -54,6 +54,7 @@ export default () => {
     cronEnabled: process.env.TMDB_CRON_ENABLED !== 'false',
     popularPages: parseInt(process.env.SYNC_POPULAR_PAGES ?? '5', 10),
     nowPlayingPages: parseInt(process.env.SYNC_NOW_PLAYING_PAGES ?? '3', 10),
+    topRatedPages: parseInt(process.env.SYNC_TOP_RATED_PAGES ?? '60', 10),
   },
 
   admin: {
