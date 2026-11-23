@@ -20,8 +20,12 @@ export function normalizeMovieTitle(
   raw: string,
   options?: { stripArticles?: boolean },
 ): string {
+  // Fold Latin diacritics (e.g. "Amélie" -> "Amelie") without decomposing Cyrillic letters like "й"/"ї".
   let text = raw
     .normalize('NFKC')
+    .replace(/[A-Za-z\u00C0-\u024F]/g, (ch) =>
+      ch.normalize('NFD').replace(/[\u0300-\u036f]/g, ''),
+    )
     .toLowerCase()
     .replace(/&/g, ' and ')
     .replace(/[’'`]/g, '')

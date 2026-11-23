@@ -136,11 +136,28 @@ describe('MovieTitleMatcher', () => {
     expect(nonMatchingYear).toBeNull();
   });
 
-  it('normalizes titles and extracts main part cleanly', () => {
+  it('normalizes titles and extracts main part cleanly, including Latin diacritics without breaking Cyrillic', () => {
     expect(normalizeMovieTitle("Schindler's List: Special Edition")).toBe(
       'schindlers list special edition',
     );
+    expect(normalizeMovieTitle('Amélie')).toBe('amelie');
+    expect(normalizeMovieTitle('Бійцівський клуб')).toBe('бійцівський клуб');
     expect(normalizeMovieTitle('The Dark Knight', { stripArticles: true })).toBe('dark knight');
     expect(extractMainTitle('Dune: Part Two')).toBe('Dune');
+
+    const amelieCatalog: CatalogMovieCandidate[] = [
+      {
+        id: 590,
+        tmdbId: 194,
+        title: 'Амелі',
+        titleEn: 'Amélie',
+        releaseDate: new Date('2001-04-25T00:00:00Z'),
+        popularity: 18,
+        voteCount: 11000,
+      },
+    ];
+    const match = findBestCatalogMatch('Amelie', 2001, amelieCatalog);
+    expect(match).not.toBeNull();
+    expect(match!.candidate.tmdbId).toBe(194);
   });
 });
