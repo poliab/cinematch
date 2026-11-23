@@ -102,4 +102,32 @@ export class TmdbClientService {
     );
     return response.data;
   }
+
+  async searchMovies(
+    query: string,
+    year?: number,
+    language = 'en-US',
+  ): Promise<{ results: any[]; lookupFailed?: boolean }> {
+    const url = `${this.baseUrl}/search/movie`;
+    try {
+      const response = await firstValueFrom(
+        this.httpService.get(url, {
+          headers: this.getHeaders(),
+          params: {
+            query,
+            include_adult: false,
+            language,
+            ...(year !== undefined ? { year } : {}),
+          },
+          timeout: 8000,
+        }),
+      );
+      return {
+        results: Array.isArray(response.data?.results) ? response.data.results : [],
+      };
+    } catch (error: any) {
+      this.logger.warn(`TMDb search/movie failed for "${query}": ${error?.message ?? 'unknown error'}`);
+      return { results: [], lookupFailed: true };
+    }
+  }
 }

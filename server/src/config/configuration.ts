@@ -36,9 +36,12 @@ export default () => {
   ai: {
     primaryProvider: process.env.AI_PRIMARY_PROVIDER ?? 'google',
     enableFallback: process.env.AI_ENABLE_FALLBACK === 'true',
+    strategy: process.env.AI_STRATEGY ?? 'c1',
+    temperature: parseFloat(process.env.AI_TEMPERATURE ?? '0.2'),
     google: {
       apiKey: process.env.GOOGLE_AI_API_KEY,
       model: process.env.GOOGLE_AI_MODEL ?? 'gemini-1.5-flash',
+      thinkingLevel: process.env.GOOGLE_AI_THINKING_LEVEL ?? 'MINIMAL',
       timeoutMs: parseInt(process.env.GOOGLE_AI_TIMEOUT_MS ?? '10000', 10),
     },
     openrouter: {

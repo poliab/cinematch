@@ -1,35 +1,58 @@
-import { Injectable } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { HttpService } from '@nestjs/axios';
-import { firstValueFrom } from 'rxjs';
-import { NormalizedRecommendationResult } from '../dto/recommendation-response.dto';
+import {
+  NormalizedRecommendationResult,
+  RecommendationStrategy,
+} from '../dto/recommendation-response.dto';
 
-export interface IAiRecommendationProvider {
-  getRecommendations(prompt: string): Promise<NormalizedRecommendationResult>;
+export interface AiProviderRequestOptions {
+  model?: string;
+  temperature?: number;
+  thinkingLevel?: 'MINIMAL' | 'LOW' | 'MEDIUM' | 'HIGH';
+  timeoutMs?: number;
 }
 
-@Injectable()
+export interface IAiRecommendationProvider {
+  getRecommendations(
+    prompt: string,
+    options?: AiProviderRequestOptions,
+  ): Promise<NormalizedRecommendationResult>;
+}
+
 export class RecommendationPromptBuilder {
-  buildPrompt(signals: {
-    entryType: string;
-    scenarioKey?: string;
-    moodInput?: string;
-    freeTextPrompt?: string;
-    genreName?: string;
-    seedMovieTitle?: string;
-    favoriteGenreNames?: string[];
-    watchedCount?: number;
-    refinements?: Record<string, boolean>;
-  }): string {
+  buildPrompt(
+    signals: {
+      entryType: string;
+      scenarioKey?: string;
+      moodInput?: string;
+      freeTextPrompt?: string;
+      genreName?: string;
+      seedMovieTitle?: string;
+      favoriteGenreNames?: string[];
+      watchedCount?: number;
+      refinements?: Record<string, boolean>;
+    },
+    strategy: RecommendationStrategy = 'c1',
+  ): string {
     const parts: string[] = [];
 
-    parts.push(
-      'You are a movie recommendation assistant. ' +
-      'Return a JSON object with fields: ' +
-      '"tmdbIds" (array of 5-8 real TMDb movie IDs as integers), ' +
-      '"explanation" (one or two sentences explaining why these movies match the request). ' +
-      'Do not include any text outside the JSON object.',
-    );
+    if (strategy === 'c2') {
+      parts.push(
+        'You are a movie recommendation assistant. ' +
+          'Return a JSON object with fields: ' +
+          '"items" (array of 5-8 objects, each with "title" — the original English movie title as a string, ' +
+          'and "year" — the release year as an integer, e.g. {"title": "Interstellar", "year": 2014}), ' +
+          '"explanation" (one or two sentences explaining why these movies match the request). ' +
+          'Do not return numeric IDs and do not include any text outside the JSON object.',
+      );
+    } else {
+      parts.push(
+        'You are a movie recommendation assistant. ' +
+          'Return a JSON object with fields: ' +
+          '"items" (array of 5-8 objects, each with "tmdbId" — real TMDb movie ID as integer, ' +
+          'and "title" — the movie title you intended for that ID, e.g. {"tmdbId": 157336, "title": "Interstellar"}), ' +
+          '"explanation" (one or two sentences explaining why these movies match the request). ' +
+          'Do not include any text outside the JSON object.',
+      );
+    }
 
     if (signals.freeTextPrompt) {
       parts.push(`User request: "${signals.freeTextPrompt}"`);

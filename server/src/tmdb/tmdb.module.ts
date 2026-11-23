@@ -18,6 +18,7 @@ import { TmdbController, TmdbAutoSyncController } from './tmdb.controller';
     TmdbSyncService,
   ],
   exports: [
+    TmdbClientService,
     TmdbSyncService,
   ],
 })

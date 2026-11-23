@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { HttpModule } from '@nestjs/axios';
 import { PrismaModule } from '../prisma/prisma.module';
+import { TmdbModule } from '../tmdb/tmdb.module';
 import { RecommendationsService } from './recommendations.service';
 import { RecommendationsController } from './recommendations.controller';
 import { GoogleAiProviderService } from './providers/google-ai-provider.service';
@@ -10,7 +11,7 @@ import { RecommendationPromptBuilder } from './providers/ai-provider.interface';
 import { RecommendationSessionRepository } from './recommendation-session.repository';
 
 @Module({
-  imports: [HttpModule, PrismaModule],
+  imports: [HttpModule, PrismaModule, TmdbModule],
   controllers: [RecommendationsController],
   providers: [
     RecommendationsService,

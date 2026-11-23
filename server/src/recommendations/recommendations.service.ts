@@ -1,17 +1,35 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
+import { TmdbClientService } from '../tmdb/tmdb-client.service';
 import { CreateRecommendationDto } from './dto/create-recommendation.dto';
 import {
   RecommendationResponseDto,
   RecommendationMovieCard,
   NormalizedRecommendationResult,
+  RecommendationStrategy,
+  ResolvedItemTelemetry,
+  RecommendedItemHint,
 } from './dto/recommendation-response.dto';
 import { GoogleAiProviderService } from './providers/google-ai-provider.service';
 import { OpenRouterProviderService } from './providers/openrouter-provider.service';
 import { RuleBasedRecommenderService } from './providers/rule-based-recommender.service';
-import { RecommendationPromptBuilder } from './providers/ai-provider.interface';
+import {
+  AiProviderRequestOptions,
+  RecommendationPromptBuilder,
+} from './providers/ai-provider.interface';
 import { RecommendationSessionRepository } from './recommendation-session.repository';
+import {
+  CatalogMovieCandidate,
+  findBestCatalogMatch,
+} from './movie-title-matcher';
+
+export interface GetRecommendationsRunOptions {
+  strategyOverride?: RecommendationStrategy;
+  primaryProviderOverride?: 'google' | 'openrouter';
+  enableFallbackOverride?: boolean;
+  providerOptions?: AiProviderRequestOptions;
+}
 
 @Injectable()
 export class RecommendationsService {
@@ -25,14 +43,17 @@ export class RecommendationsService {
     private readonly ruleBased: RuleBasedRecommenderService,
     private readonly promptBuilder: RecommendationPromptBuilder,
     private readonly sessionRepo: RecommendationSessionRepository,
+    @Optional() private readonly tmdbClient?: TmdbClientService,
   ) {}
 
   async getRecommendations(
     dto: CreateRecommendationDto,
     userId?: number,
     lang = 'uk',
+    runOptions?: GetRecommendationsRunOptions,
   ): Promise<RecommendationResponseDto> {
     const userContext = userId ? await this.resolveUserContext(userId) : null;
+    const strategy = this.resolveStrategy(runOptions?.strategyOverride ?? dto.strategy);
 
     const genreName = dto.genreId
       ? (await this.prisma.genre.findUnique({ where: { id: dto.genreId } }))?.name
@@ -42,21 +63,71 @@ export class RecommendationsService {
       ? (await this.prisma.movie.findUnique({ where: { id: dto.seedMovieId } }))?.title
       : undefined;
 
-    const prompt = this.promptBuilder.buildPrompt({
-      entryType: dto.entryType,
-      scenarioKey: dto.scenarioKey,
-      moodInput: dto.moodInput,
-      freeTextPrompt: dto.freeTextPrompt,
-      genreName,
-      seedMovieTitle,
-      favoriteGenreNames: userContext?.favoriteGenreNames,
-      watchedCount: userContext?.watchedMovieIds.length,
-      refinements: dto.refinements as Record<string, boolean> | undefined,
-    });
+    if (strategy === 'rule_based') {
+      const ruleResult = await this.ruleBased.getRecommendations({
+        genreId: dto.genreId,
+        seedMovieId: dto.seedMovieId,
+        excludeMovieIds: userContext?.watchedMovieIds,
+        moodInput: dto.moodInput,
+        scenarioKey: dto.scenarioKey,
+        freeTextPrompt: dto.freeTextPrompt,
+        refinements: dto.refinements as Record<string, boolean> | undefined,
+        limit: 8,
+      });
+      const movies = await this.resolveMovies(
+        ruleResult.movieTmdbIds,
+        userContext?.watchedMovieIds ?? [],
+        dto.genreId,
+        lang,
+      );
+      return {
+        sessionId: null,
+        explanation: ruleResult.explanation,
+        providerUsed: 'rule_based',
+        isFallback: true,
+        strategyUsed: 'rule_based',
+        movies,
+        refinementOptions: this.getRefinementOptions(dto),
+        diagnostics: {
+          strategyUsed: 'rule_based',
+          jsonValid: true,
+          catalogMatchesBeforeFallback: movies.length,
+          supplementedByRuleBased: false,
+          resolvedItems: movies.map((m) => ({
+            inputTmdbId: m.tmdbId,
+            inputTitle: m.title,
+            matchedInCatalog: true,
+            catalogTmdbId: m.tmdbId,
+            matchTier: 'tmdb_id',
+            existsInTmdb: true,
+          })),
+        },
+      };
+    }
 
-    let result: NormalizedRecommendationResult | null = null;
-    const primaryProvider = this.config.get<string>('ai.primaryProvider') ?? 'google';
-    const enableFallback = this.config.get<boolean>('ai.enableFallback') ?? true;
+    const prompt = this.promptBuilder.buildPrompt(
+      {
+        entryType: dto.entryType,
+        scenarioKey: dto.scenarioKey,
+        moodInput: dto.moodInput,
+        freeTextPrompt: dto.freeTextPrompt,
+        genreName,
+        seedMovieTitle,
+        favoriteGenreNames: userContext?.favoriteGenreNames,
+        watchedCount: userContext?.watchedMovieIds.length,
+        refinements: dto.refinements as Record<string, boolean> | undefined,
+      },
+      strategy,
+    );
+
+    const primaryProvider =
+      runOptions?.primaryProviderOverride ??
+      (this.config.get<string>('ai.primaryProvider') as 'google' | 'openrouter' | undefined) ??
+      'google';
+    const enableFallback =
+      runOptions?.enableFallbackOverride ??
+      this.config.get<boolean>('ai.enableFallback') ??
+      true;
 
     let sessionId: number | null = null;
     if (userId) {
@@ -73,33 +144,48 @@ export class RecommendationsService {
       }
     }
 
-    if (primaryProvider === 'google') {
-      result = await this.tryProvider('google', prompt, enableFallback, sessionId ?? undefined);
-    } else {
-      result = await this.tryProvider('openrouter', prompt, enableFallback, sessionId ?? undefined);
-    }
+    const result = await this.tryProvider(
+      primaryProvider,
+      prompt,
+      enableFallback,
+      sessionId ?? undefined,
+      runOptions?.providerOptions,
+    );
+
+    const watchedIds = userContext?.watchedMovieIds ?? [];
+    const { matchedTmdbIds, resolvedItems } = await this.resolveStrategyOutput(
+      strategy,
+      result,
+    );
 
     let movies = await this.resolveMovies(
-      result?.movieTmdbIds ?? [],
-      userContext?.watchedMovieIds ?? [],
+      matchedTmdbIds,
+      watchedIds,
       dto.genreId,
       lang,
     );
 
+    const catalogMatchesBeforeFallback = movies.length;
+    let supplementedByRuleBased = false;
+    let finalResult = result;
+
     if (movies.length < 3) {
+      supplementedByRuleBased = true;
       this.logger.log('AI result had too few local matches — supplementing with rule-based');
       const ruleResult = await this.ruleBased.getRecommendations({
         genreId: dto.genreId,
         seedMovieId: dto.seedMovieId,
-        excludeMovieIds: userContext?.watchedMovieIds,
+        excludeMovieIds: watchedIds,
+        moodInput: dto.moodInput,
         scenarioKey: dto.scenarioKey,
+        freeTextPrompt: dto.freeTextPrompt,
         refinements: dto.refinements as Record<string, boolean> | undefined,
         limit: 8,
       });
 
       const ruleMovies = await this.resolveMovies(
         ruleResult.movieTmdbIds,
-        userContext?.watchedMovieIds ?? [],
+        watchedIds,
         dto.genreId,
         lang,
       );
@@ -108,16 +194,16 @@ export class RecommendationsService {
       const supplementary = ruleMovies.filter((m) => !existingIds.has(m.id));
       movies = [...movies, ...supplementary].slice(0, 8);
 
-      if (!result || movies.length === 0) {
-        result = ruleResult;
+      if (!finalResult || catalogMatchesBeforeFallback === 0) {
+        finalResult = ruleResult;
       }
     }
 
-    if (userId && result && sessionId) {
+    if (userId && finalResult && sessionId) {
       try {
         await this.prisma.recommendationSession.update({
           where: { id: sessionId },
-          data: { providerUsed: result.providerUsed, isFallback: result.isFallback },
+          data: { providerUsed: finalResult.providerUsed, isFallback: finalResult.isFallback },
         });
 
         const request = await this.sessionRepo.createRequest({
@@ -137,14 +223,232 @@ export class RecommendationsService {
       }
     }
 
+    const modelUsed =
+      runOptions?.providerOptions?.model ??
+      (finalResult?.providerUsed === 'google'
+        ? this.config.get<string>('ai.google.model')
+        : finalResult?.providerUsed === 'openrouter'
+          ? this.config.get<string>('ai.openrouter.model')
+          : undefined);
+
     return {
       sessionId,
-      explanation: result?.explanation ?? 'Movies selected for you.',
-      providerUsed: result?.providerUsed ?? 'rule_based',
-      isFallback: result?.isFallback ?? true,
+      explanation: finalResult?.explanation ?? 'Movies selected for you.',
+      providerUsed: finalResult?.providerUsed ?? 'rule_based',
+      isFallback: finalResult?.isFallback ?? true,
+      strategyUsed: strategy,
       movies,
       refinementOptions: this.getRefinementOptions(dto),
+      diagnostics: {
+        strategyUsed: strategy,
+        modelUsed,
+        rawText: result?.rawText,
+        jsonValid: result?.jsonValid ?? false,
+        tokenUsage: result?.tokenUsage,
+        catalogMatchesBeforeFallback,
+        supplementedByRuleBased,
+        resolvedItems,
+      },
     };
+  }
+
+  private resolveStrategy(requested?: string): RecommendationStrategy {
+    const raw = (requested ?? this.config.get<string>('ai.strategy') ?? 'c1').toLowerCase();
+    if (raw === 'c2' || raw === 'c3' || raw === 'rule_based') {
+      return raw;
+    }
+    return 'c1';
+  }
+
+  private async resolveStrategyOutput(
+    strategy: RecommendationStrategy,
+    result: NormalizedRecommendationResult,
+  ): Promise<{ matchedTmdbIds: number[]; resolvedItems: ResolvedItemTelemetry[] }> {
+    if (!result || result.providerUsed === 'rule_based') {
+      const ids = this.uniqueNumbers(result?.movieTmdbIds ?? []);
+      return {
+        matchedTmdbIds: ids,
+        resolvedItems: ids.map((tmdbId) => ({
+          inputTmdbId: tmdbId,
+          matchedInCatalog: true,
+          catalogTmdbId: tmdbId,
+          matchTier: 'tmdb_id',
+        })),
+      };
+    }
+
+    if (strategy === 'c2') {
+      const hints = (result.items ?? []).filter((i) => i.title);
+      return this.resolveC2Items(hints);
+    }
+
+    // Strategy C1 (and default fallback): resolve numeric tmdbIds against local catalog, keeping title hints for telemetry.
+    const rawIds = this.uniqueNumbers(result.movieTmdbIds ?? []);
+    const existingMovies = rawIds.length
+      ? await this.prisma.movie.findMany({
+          where: { tmdbId: { in: rawIds } },
+          select: { tmdbId: true },
+        })
+      : [];
+    const existingSet = new Set(existingMovies.map((m) => m.tmdbId));
+
+    const itemHints: RecommendedItemHint[] =
+      result.items?.length ? result.items : rawIds.map((tmdbId) => ({ tmdbId }));
+
+    const resolvedItems: ResolvedItemTelemetry[] = itemHints.map((hint) => ({
+      inputTmdbId: hint.tmdbId,
+      inputTitle: hint.title,
+      matchedInCatalog: hint.tmdbId !== undefined && existingSet.has(hint.tmdbId),
+      catalogTmdbId:
+        hint.tmdbId !== undefined && existingSet.has(hint.tmdbId) ? hint.tmdbId : undefined,
+      matchTier: hint.tmdbId !== undefined && existingSet.has(hint.tmdbId) ? 'tmdb_id' : undefined,
+    }));
+
+    return { matchedTmdbIds: rawIds, resolvedItems };
+  }
+
+  private async resolveC2Items(
+    items: RecommendedItemHint[],
+  ): Promise<{ matchedTmdbIds: number[]; resolvedItems: ResolvedItemTelemetry[] }> {
+    if (!items.length) {
+      return { matchedTmdbIds: [], resolvedItems: [] };
+    }
+
+    const catalogMovies: CatalogMovieCandidate[] = await this.prisma.movie.findMany({
+      select: {
+        id: true,
+        tmdbId: true,
+        title: true,
+        titleEn: true,
+        releaseDate: true,
+        popularity: true,
+        voteCount: true,
+      },
+    });
+    const catalogByTmdbId = new Map(catalogMovies.map((m) => [m.tmdbId, m]));
+
+    const matchedTmdbIds: number[] = [];
+    const seenTmdbIds = new Set<number>();
+    const resolvedItems: ResolvedItemTelemetry[] = [];
+
+    for (const item of items) {
+      const title = item.title?.trim();
+      if (!title) continue;
+
+      const localMatch = findBestCatalogMatch(title, item.year, catalogMovies);
+      if (localMatch) {
+        const tmdbId = localMatch.candidate.tmdbId;
+        if (!seenTmdbIds.has(tmdbId)) {
+          seenTmdbIds.add(tmdbId);
+          matchedTmdbIds.push(tmdbId);
+        }
+        resolvedItems.push({
+          inputTitle: title,
+          inputYear: item.year,
+          matchedInCatalog: true,
+          catalogTmdbId: tmdbId,
+          matchTier: localMatch.tier,
+          existsInTmdb: true,
+        });
+        continue;
+      }
+
+      const tmdbCheck = await this.lookupInTmdb(title, item.year);
+      if (tmdbCheck.tmdbId !== undefined) {
+        const aliasInCatalog = catalogByTmdbId.get(tmdbCheck.tmdbId);
+        if (aliasInCatalog) {
+          if (!seenTmdbIds.has(aliasInCatalog.tmdbId)) {
+            seenTmdbIds.add(aliasInCatalog.tmdbId);
+            matchedTmdbIds.push(aliasInCatalog.tmdbId);
+          }
+          resolvedItems.push({
+            inputTitle: title,
+            inputYear: item.year,
+            matchedInCatalog: true,
+            catalogTmdbId: aliasInCatalog.tmdbId,
+            matchTier: 'tmdb_alias',
+            existsInTmdb: true,
+            tmdbLookupId: tmdbCheck.tmdbId,
+            tmdbLookupTitle: tmdbCheck.tmdbTitle,
+          });
+          continue;
+        }
+      }
+
+      resolvedItems.push({
+        inputTitle: title,
+        inputYear: item.year,
+        matchedInCatalog: false,
+        existsInTmdb: tmdbCheck.existsInTmdb,
+        tmdbLookupId: tmdbCheck.tmdbId,
+        tmdbLookupTitle: tmdbCheck.tmdbTitle,
+        tmdbLookupFailed: tmdbCheck.lookupFailed,
+      });
+    }
+
+    return { matchedTmdbIds, resolvedItems };
+  }
+
+  private async lookupInTmdb(
+    title: string,
+    year?: number,
+  ): Promise<{
+    existsInTmdb: boolean;
+    tmdbId?: number;
+    tmdbTitle?: string;
+    lookupFailed?: boolean;
+  }> {
+    if (!this.tmdbClient) {
+      return { existsInTmdb: false, lookupFailed: true };
+    }
+
+    let search = await this.tmdbClient.searchMovies(title, year, 'en-US');
+    if (search.lookupFailed) {
+      return { existsInTmdb: false, lookupFailed: true };
+    }
+
+    // TMDb `year` query param is exact; retry once without year so ±1 year release shifts match.
+    if (search.results.length === 0 && year !== undefined) {
+      search = await this.tmdbClient.searchMovies(title, undefined, 'en-US');
+      if (search.lookupFailed) {
+        return { existsInTmdb: false, lookupFailed: true };
+      }
+    }
+
+    const tmdbCandidates: CatalogMovieCandidate[] = search.results
+      .filter((r) => typeof r?.id === 'number')
+      .map((r) => ({
+        id: r.id,
+        tmdbId: r.id,
+        title: r.title ?? '',
+        titleEn: r.original_title ?? r.title,
+        releaseDate: r.release_date,
+        popularity: r.popularity ?? 0,
+        voteCount: r.vote_count ?? 0,
+      }));
+
+    const best = findBestCatalogMatch(title, year, tmdbCandidates);
+    if (!best) {
+      return { existsInTmdb: false };
+    }
+
+    return {
+      existsInTmdb: true,
+      tmdbId: best.candidate.tmdbId,
+      tmdbTitle: best.candidate.titleEn ?? best.candidate.title,
+    };
+  }
+
+  private uniqueNumbers(values: number[]): number[] {
+    const seen = new Set<number>();
+    const out: number[] = [];
+    for (const v of values) {
+      if (!seen.has(v)) {
+        seen.add(v);
+        out.push(v);
+      }
+    }
+    return out;
   }
 
   async getUserHistory(userId: number, lang = 'uk') {
@@ -204,19 +508,19 @@ export class RecommendationsService {
     };
   }
 
-
   private async tryProvider(
     provider: 'google' | 'openrouter',
     prompt: string,
     enableFallback: boolean,
     sessionId?: number,
+    providerOptions?: AiProviderRequestOptions,
   ): Promise<NormalizedRecommendationResult> {
     const primary = provider === 'google' ? this.google : this.openRouter;
     const secondary = provider === 'google' ? this.openRouter : this.google;
 
     const t0 = Date.now();
     try {
-      const result = await primary.getRecommendations(prompt);
+      const result = await primary.getRecommendations(prompt, providerOptions);
       if (sessionId) {
         this.sessionRepo
           .logAiProvider({ sessionId, provider, latencyMs: Date.now() - t0, status: 'success' })

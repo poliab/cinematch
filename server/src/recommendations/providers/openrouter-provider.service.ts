@@ -2,8 +2,15 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
-import { IAiRecommendationProvider } from './ai-provider.interface';
+import {
+  AiProviderRequestOptions,
+  IAiRecommendationProvider,
+} from './ai-provider.interface';
 import { NormalizedRecommendationResult } from '../dto/recommendation-response.dto';
+import {
+  normalizeOpenAiTokenUsage,
+  parseAiRecommendationJson,
+} from './ai-response.parser';
 
 @Injectable()
 export class OpenRouterProviderService implements IAiRecommendationProvider {
@@ -11,6 +18,7 @@ export class OpenRouterProviderService implements IAiRecommendationProvider {
   private readonly apiKey: string | undefined;
   private readonly baseUrl: string;
   private readonly model: string;
+  private readonly temperature: number;
   private readonly timeoutMs: number;
 
   constructor(
@@ -24,28 +32,36 @@ export class OpenRouterProviderService implements IAiRecommendationProvider {
     this.model =
       this.config.get<string>('ai.openrouter.model') ??
       'mistralai/mistral-7b-instruct';
+    this.temperature = this.config.get<number>('ai.temperature') ?? 0.2;
     this.timeoutMs = this.config.get<number>('ai.openrouter.timeoutMs') ?? 10000;
   }
 
-  async getRecommendations(prompt: string): Promise<NormalizedRecommendationResult> {
+  async getRecommendations(
+    prompt: string,
+    options?: AiProviderRequestOptions,
+  ): Promise<NormalizedRecommendationResult> {
     if (!this.apiKey || this.apiKey === 'placeholder_key') {
       throw new Error('OpenRouter API key not configured');
     }
 
+    const model = options?.model ?? this.model;
+    const temperature = options?.temperature ?? this.temperature;
+    const timeoutMs = options?.timeoutMs ?? this.timeoutMs;
     const url = `${this.baseUrl}/chat/completions`;
     const startTime = Date.now();
 
     try {
       const systemMessage =
         'You are a helpful movie recommendation assistant. ' +
-        'Always respond with a valid JSON object containing "tmdbIds" (array of integers) ' +
-        'and "explanation" (one or two sentences). No markdown, no extra text.';
+        'Always respond with a valid JSON object matching the schema requested in the user prompt. ' +
+        'No markdown, no extra text.';
 
       const response = await firstValueFrom(
         this.http.post(
           url,
           {
-            model: this.model,
+            model,
+            temperature,
             messages: [
               { role: 'system', content: systemMessage },
               { role: 'user', content: prompt },
@@ -56,42 +72,40 @@ export class OpenRouterProviderService implements IAiRecommendationProvider {
               Authorization: `Bearer ${this.apiKey}`,
               'Content-Type': 'application/json',
             },
-            timeout: this.timeoutMs,
+            timeout: timeoutMs,
           },
         ),
       );
 
       const latency = Date.now() - startTime;
-      this.logger.log(`OpenRouter responded in ${latency}ms`);
+      this.logger.log(`OpenRouter (${model}) responded in ${latency}ms`);
 
       const text: string =
         response.data?.choices?.[0]?.message?.content ?? '';
 
-      const parsed = this.parseJsonResponse(text);
+      const parsed = parseAiRecommendationJson(text);
+      if (!parsed.jsonValid) {
+        this.logger.warn(
+          `Failed to parse OpenRouter JSON response. Raw text (first 200 chars): ${text.slice(0, 200)}`,
+        );
+      }
+
       return {
-        movieTmdbIds: parsed.tmdbIds ?? [],
+        movieTmdbIds: parsed.movieTmdbIds,
+        items: parsed.items,
         explanation: parsed.explanation ?? 'Curated selection based on your request.',
         providerUsed: 'openrouter',
         isFallback: false,
+        rawText: text,
+        jsonValid: parsed.jsonValid,
+        tokenUsage: normalizeOpenAiTokenUsage(response.data?.usage),
       };
     } catch (err: any) {
       const latency = Date.now() - startTime;
       this.logger.warn(
-        `OpenRouter failed after ${latency}ms: ${err?.message ?? 'unknown error'}`,
+        `OpenRouter (${model}) failed after ${latency}ms: ${err?.message ?? 'unknown error'}`,
       );
       throw err;
-    }
-  }
-
-  private parseJsonResponse(text: string): { tmdbIds?: number[]; explanation?: string } {
-    try {
-      const cleaned = text.replace(/```json?/g, '').replace(/```/g, '').trim();
-      return JSON.parse(cleaned);
-    } catch {
-      this.logger.warn(
-        `Failed to parse OpenRouter JSON response. Raw text (first 200 chars): ${text.slice(0, 200)}`,
-      );
-      return {};
     }
   }
 }
