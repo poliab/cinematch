@@ -357,9 +357,14 @@ async function main() {
 
     const tokenWindowByModel = new Map<string, Array<{ ts: number; tokens: number }>>();
     const lastCallAtByModel = new Map<string, number>();
+    const consecutive429ByModel = new Map<string, number>();
+    const exhaustedModels = new Set<string>();
 
     for (let idx = 0; idx < pending.length; idx++) {
       const task = pending[idx];
+      if (exhaustedModels.has(task.model)) {
+        continue;
+      }
       const isLlm = task.strategy !== 'rule_based';
 
       if (isLlm) {
@@ -586,6 +591,19 @@ async function main() {
       }
 
       if (record) {
+        if (!record.error) {
+          consecutive429ByModel.set(task.model, 0);
+        } else if (record.error.includes('429')) {
+          const hits = (consecutive429ByModel.get(task.model) ?? 0) + 1;
+          consecutive429ByModel.set(task.model, hits);
+          if (hits >= 3) {
+            exhaustedModels.add(task.model);
+            console.warn(
+              `[bench] 3 consecutive 429 quota errors for ${task.model}; skipping remaining calls for this model so you can --resume after quota reset.`,
+            );
+            continue;
+          }
+        }
         fs.appendFileSync(args.outPath, JSON.stringify(record) + '\n', 'utf-8');
         console.log(
           `[${idx + 1}/${pending.length}] q#${record.queryId} ${record.strategy} ${record.model} r${record.repeat} -> ${record.error ? `ERR: ${record.error}` : `${record.latencyMs}ms catalog=${record.catalogMatchesBeforeFallback} fallback=${record.supplementedByRuleBased}`}`,
