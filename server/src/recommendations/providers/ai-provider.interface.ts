@@ -29,6 +29,7 @@ export class RecommendationPromptBuilder {
       favoriteGenreNames?: string[];
       watchedCount?: number;
       refinements?: Record<string, boolean>;
+      c3CandidatesBlock?: string;
     },
     strategy: RecommendationStrategy = 'c1',
   ): string {
@@ -42,6 +43,17 @@ export class RecommendationPromptBuilder {
           'and "year" — the release year as an integer, e.g. {"title": "Interstellar", "year": 2014}), ' +
           '"explanation" (one or two sentences explaining why these movies match the request). ' +
           'Do not return numeric IDs and do not include any text outside the JSON object.',
+      );
+    } else if (strategy === 'c3') {
+      parts.push(
+        'You are a movie recommendation assistant. ' +
+          'Choose 5-8 movies ONLY from the catalog candidate list below. ' +
+          'Strictly obey any genre, exclusion, or release year constraints in the user request. ' +
+          'Return a JSON object with fields: ' +
+          '"items" (array of 5-8 objects using exact "tmdbId" integers from the candidate list and their "title", ' +
+          'e.g. {"tmdbId": 157336, "title": "Interstellar"}), ' +
+          '"explanation" (one or two sentences explaining why these movies match the request). ' +
+          'Never invent IDs outside the candidate list and do not include any text outside the JSON object.',
       );
     } else {
       parts.push(
@@ -91,6 +103,12 @@ export class RecommendationPromptBuilder {
     if (signals.refinements?.newer) parts.push('Prefer newer/recent releases.');
     if (signals.refinements?.moreSerious) parts.push('User wants something more serious.');
     if (signals.refinements?.lessRomantic) parts.push('Avoid strong romantic elements.');
+
+    if (signals.c3CandidatesBlock) {
+      parts.push('');
+      parts.push('Catalog candidates (tmdbId | title (year) [genres]):');
+      parts.push(signals.c3CandidatesBlock);
+    }
 
     return parts.join('\n');
   }

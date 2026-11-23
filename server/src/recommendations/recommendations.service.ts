@@ -23,6 +23,11 @@ import {
   CatalogMovieCandidate,
   findBestCatalogMatch,
 } from './movie-title-matcher';
+import {
+  C3CatalogMovie,
+  formatCandidatesForPrompt,
+  selectCandidatesForC3,
+} from './c3-candidate-selector';
 
 export interface GetRecommendationsRunOptions {
   strategyOverride?: RecommendationStrategy;
@@ -105,6 +110,24 @@ export class RecommendationsService {
       };
     }
 
+    const watchedIds = userContext?.watchedMovieIds ?? [];
+    let c3Candidates: C3CatalogMovie[] | undefined;
+    let c3StrictMatchCount: number | undefined;
+    let c3CandidatesBlock: string | undefined;
+
+    if (strategy === 'c3') {
+      const prepared = await this.prepareC3Candidates({
+        dto,
+        genreName,
+        seedMovieTitle,
+        favoriteGenreNames: userContext?.favoriteGenreNames,
+        watchedIds,
+      });
+      c3Candidates = prepared.candidates;
+      c3StrictMatchCount = prepared.strictMatchCount;
+      c3CandidatesBlock = prepared.candidatesBlock;
+    }
+
     const prompt = this.promptBuilder.buildPrompt(
       {
         entryType: dto.entryType,
@@ -114,8 +137,9 @@ export class RecommendationsService {
         genreName,
         seedMovieTitle,
         favoriteGenreNames: userContext?.favoriteGenreNames,
-        watchedCount: userContext?.watchedMovieIds.length,
+        watchedCount: watchedIds.length,
         refinements: dto.refinements as Record<string, boolean> | undefined,
+        c3CandidatesBlock,
       },
       strategy,
     );
@@ -152,10 +176,10 @@ export class RecommendationsService {
       runOptions?.providerOptions,
     );
 
-    const watchedIds = userContext?.watchedMovieIds ?? [];
     const { matchedTmdbIds, resolvedItems } = await this.resolveStrategyOutput(
       strategy,
       result,
+      c3Candidates,
     );
 
     let movies = await this.resolveMovies(
@@ -245,6 +269,9 @@ export class RecommendationsService {
         rawText: result?.rawText,
         jsonValid: result?.jsonValid ?? false,
         tokenUsage: result?.tokenUsage,
+        promptChars: prompt.length,
+        c3CandidateCount: c3Candidates?.length,
+        c3StrictMatchCount,
         catalogMatchesBeforeFallback,
         supplementedByRuleBased,
         resolvedItems,
@@ -260,9 +287,70 @@ export class RecommendationsService {
     return 'c1';
   }
 
+  private async prepareC3Candidates(params: {
+    dto: CreateRecommendationDto;
+    genreName?: string;
+    seedMovieTitle?: string;
+    favoriteGenreNames?: string[];
+    watchedIds: number[];
+  }): Promise<{
+    candidates: C3CatalogMovie[];
+    strictMatchCount: number;
+    candidatesBlock: string;
+  }> {
+    const rows = await this.prisma.movie.findMany({
+      select: {
+        id: true,
+        tmdbId: true,
+        title: true,
+        titleEn: true,
+        releaseDate: true,
+        voteAverage: true,
+        voteCount: true,
+        popularity: true,
+        genres: { include: { genre: true } },
+      },
+    });
+
+    const catalog: C3CatalogMovie[] = rows.map((m) => ({
+      id: m.id,
+      tmdbId: m.tmdbId,
+      title: m.title,
+      titleEn: m.titleEn,
+      releaseDate: m.releaseDate,
+      voteAverage: m.voteAverage,
+      voteCount: m.voteCount,
+      popularity: m.popularity,
+      genreNames: (m.genres ?? []).map((mg) => mg.genre.name),
+    }));
+
+    const selected = selectCandidatesForC3(
+      {
+        freeTextPrompt: params.dto.freeTextPrompt,
+        moodInput: params.dto.moodInput,
+        scenarioKey: params.dto.scenarioKey,
+        genreName: params.genreName,
+        seedMovieTitle: params.seedMovieTitle,
+        favoriteGenreNames: params.favoriteGenreNames,
+        refinements: params.dto.refinements as Record<string, boolean> | undefined,
+      },
+      catalog,
+      params.watchedIds,
+      40,
+      30,
+    );
+
+    return {
+      candidates: selected.candidates,
+      strictMatchCount: selected.strictMatchCount,
+      candidatesBlock: formatCandidatesForPrompt(selected.candidates),
+    };
+  }
+
   private async resolveStrategyOutput(
     strategy: RecommendationStrategy,
     result: NormalizedRecommendationResult,
+    c3Candidates?: C3CatalogMovie[],
   ): Promise<{ matchedTmdbIds: number[]; resolvedItems: ResolvedItemTelemetry[] }> {
     if (!result || result.providerUsed === 'rule_based') {
       const ids = this.uniqueNumbers(result?.movieTmdbIds ?? []);
@@ -275,6 +363,35 @@ export class RecommendationsService {
           matchTier: 'tmdb_id',
         })),
       };
+    }
+
+    if (strategy === 'c3') {
+      const allowedSet = new Set((c3Candidates ?? []).map((c) => c.tmdbId));
+      const itemHints: RecommendedItemHint[] =
+        result.items?.length
+          ? result.items
+          : (result.movieTmdbIds ?? []).map((tmdbId) => ({ tmdbId }));
+
+      const matchedTmdbIds: number[] = [];
+      const seen = new Set<number>();
+      const resolvedItems: ResolvedItemTelemetry[] = itemHints.map((hint) => {
+        const inPool = hint.tmdbId !== undefined && allowedSet.has(hint.tmdbId);
+        if (inPool && hint.tmdbId !== undefined && !seen.has(hint.tmdbId)) {
+          seen.add(hint.tmdbId);
+          matchedTmdbIds.push(hint.tmdbId);
+        }
+        return {
+          inputTmdbId: hint.tmdbId,
+          inputTitle: hint.title,
+          matchedInCatalog: inPool,
+          catalogTmdbId: inPool ? hint.tmdbId : undefined,
+          matchTier: inPool ? 'candidate_whitelist' : undefined,
+          existsInTmdb: inPool ? true : undefined,
+          rejectedOutOfCandidates: !inPool,
+        };
+      });
+
+      return { matchedTmdbIds, resolvedItems };
     }
 
     if (strategy === 'c2') {

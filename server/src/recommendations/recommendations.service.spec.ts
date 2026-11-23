@@ -304,5 +304,79 @@ describe('RecommendationsService', () => {
         matchTier: 'tmdb_id',
       });
     });
+
+    it('C3 pre-selects catalog candidates, passes them in prompt, and rejects IDs outside the candidate pool', async () => {
+      const makeWithGenres = (id: number, tmdbId: number, title: string, genres: string[]) => ({
+        ...makeDbMovie(id, tmdbId, title, 2020),
+        genres: genres.map((name, idx) => ({ genre: { id: idx + 1, name } })),
+      });
+
+      const poolMovies = [
+        makeWithGenres(1, 157336, 'Interstellar', ['Фантастика', 'Драма']),
+        makeWithGenres(2, 438631, 'Dune', ['Фантастика', 'Пригоди']),
+        makeWithGenres(3, 603, 'The Matrix', ['Бойовик', 'Фантастика']),
+      ];
+
+      google.getRecommendations.mockResolvedValue({
+        movieTmdbIds: [157336, 438631, 603, 999999],
+        items: [
+          { tmdbId: 157336, title: 'Interstellar' },
+          { tmdbId: 438631, title: 'Dune' },
+          { tmdbId: 603, title: 'The Matrix' },
+          { tmdbId: 999999, title: 'Invented Outside Pool' },
+        ],
+        explanation: 'Selected from candidates.',
+        providerUsed: 'google',
+        isFallback: false,
+        jsonValid: true,
+      });
+
+      prisma.movie.findMany
+        // 1st call: prepareC3Candidates
+        .mockResolvedValueOnce(poolMovies)
+        // 2nd call: resolveMovies for whitelisted [157336, 438631, 603]
+        .mockResolvedValueOnce(poolMovies);
+
+      const res = await service.getRecommendations(
+        { entryType: 'free_text', freeTextPrompt: 'Фантастика після 2015', strategy: 'c3' },
+        undefined,
+        'uk',
+      );
+
+      expect(promptBuilder.buildPrompt).toHaveBeenCalledWith(
+        expect.objectContaining({
+          c3CandidatesBlock: expect.stringContaining('157336 | Interstellar'),
+        }),
+        'c3',
+      );
+      expect(res.strategyUsed).toBe('c3');
+      expect(res.movies.map((m) => m.tmdbId)).toEqual([157336, 438631, 603]);
+      expect(res.diagnostics?.c3CandidateCount).toBe(3);
+      expect(res.diagnostics?.resolvedItems).toEqual([
+        expect.objectContaining({
+          inputTmdbId: 157336,
+          matchedInCatalog: true,
+          matchTier: 'candidate_whitelist',
+          rejectedOutOfCandidates: false,
+        }),
+        expect.objectContaining({
+          inputTmdbId: 438631,
+          matchedInCatalog: true,
+          matchTier: 'candidate_whitelist',
+          rejectedOutOfCandidates: false,
+        }),
+        expect.objectContaining({
+          inputTmdbId: 603,
+          matchedInCatalog: true,
+          matchTier: 'candidate_whitelist',
+          rejectedOutOfCandidates: false,
+        }),
+        expect.objectContaining({
+          inputTmdbId: 999999,
+          matchedInCatalog: false,
+          rejectedOutOfCandidates: true,
+        }),
+      ]);
+    });
   });
 });

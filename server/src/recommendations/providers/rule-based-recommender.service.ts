@@ -24,18 +24,19 @@ export class RuleBasedRecommenderService {
     const excludeIds = input.excludeMovieIds ?? [];
 
     const scenarioGenreHints: Record<string, string[]> = {
-      something_light: ['Comedy', 'Animation', 'Family'],
-      something_intense: ['Thriller', 'Action', 'Crime'],
-      watch_with_friends: ['Comedy', 'Action', 'Adventure'],
-      new_scifi: ['Science Fiction'],
+      something_light: ['Comedy', 'Animation', 'Family', 'Комедія', 'Мультфільм', 'Сімейний'],
+      something_intense: ['Thriller', 'Action', 'Crime', 'Трилер', 'Бойовик', 'Кримінал'],
+      watch_with_friends: ['Comedy', 'Action', 'Adventure', 'Комедія', 'Бойовик', 'Пригоди'],
+      new_scifi: ['Science Fiction', 'Фантастика'],
       no_horror: [],
       not_sure: [],
-      warm_romance: ['Romance', 'Drama'],
-      tense_thriller: ['Thriller', 'Mystery'],
+      warm_romance: ['Romance', 'Drama', 'Мелодрама', 'Драма'],
+      tense_thriller: ['Thriller', 'Mystery', 'Трилер', 'Детектив'],
     };
 
     const excludeGenreHints: Record<string, string[]> = {
-      no_horror: ['Horror'],
+      no_horror: ['Horror', 'Жахи'],
+      tense_thriller: ['Horror', 'Жахи'],
       not_sure: [],
     };
 

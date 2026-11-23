@@ -42,8 +42,9 @@ export interface ResolvedItemTelemetry {
   inputTmdbId?: number;
   matchedInCatalog: boolean;
   catalogTmdbId?: number;
-  matchTier?: 'exact' | 'article_stripped' | 'subtitle' | 'tmdb_alias' | 'tmdb_id';
+  matchTier?: 'exact' | 'article_stripped' | 'subtitle' | 'tmdb_alias' | 'tmdb_id' | 'candidate_whitelist';
   existsInTmdb?: boolean;
+  rejectedOutOfCandidates?: boolean;
   tmdbLookupId?: number;
   tmdbLookupTitle?: string;
   tmdbLookupFailed?: boolean;
@@ -55,6 +56,9 @@ export interface RecommendationDiagnostics {
   rawText?: string;
   jsonValid: boolean;
   tokenUsage?: RecommendationTokenUsage;
+  promptChars?: number;
+  c3CandidateCount?: number;
+  c3StrictMatchCount?: number;
   catalogMatchesBeforeFallback: number;
   supplementedByRuleBased: boolean;
   resolvedItems: ResolvedItemTelemetry[];
