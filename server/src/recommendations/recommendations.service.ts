@@ -33,6 +33,7 @@ export interface GetRecommendationsRunOptions {
   strategyOverride?: RecommendationStrategy;
   primaryProviderOverride?: 'google' | 'openrouter';
   enableFallbackOverride?: boolean;
+  throwOnFailure?: boolean;
   providerOptions?: AiProviderRequestOptions;
 }
 
@@ -174,6 +175,7 @@ export class RecommendationsService {
       enableFallback,
       sessionId ?? undefined,
       runOptions?.providerOptions,
+      runOptions?.throwOnFailure,
     );
 
     const { matchedTmdbIds, resolvedItems } = await this.resolveStrategyOutput(
@@ -631,6 +633,7 @@ export class RecommendationsService {
     enableFallback: boolean,
     sessionId?: number,
     providerOptions?: AiProviderRequestOptions,
+    throwOnFailure = false,
   ): Promise<NormalizedRecommendationResult> {
     const primary = provider === 'google' ? this.google : this.openRouter;
     const secondary = provider === 'google' ? this.openRouter : this.google;
@@ -672,6 +675,10 @@ export class RecommendationsService {
               .catch((e: any) => this.logger.warn(`logAiProvider failed: ${e?.message}`));
           }
         }
+      }
+
+      if (throwOnFailure && !enableFallback) {
+        throw primaryErr;
       }
 
       this.logger.log('All AI providers failed — using rule-based fallback');

@@ -103,6 +103,31 @@ export class TmdbClientService {
     return response.data;
   }
 
+  async getMovieDetailsOptional(
+    tmdbId: number,
+    language = 'en-US',
+  ): Promise<{ found: boolean; data?: any; failed?: boolean }> {
+    const url = `${this.baseUrl}/movie/${tmdbId}`;
+    try {
+      const response = await firstValueFrom(
+        this.httpService.get(url, {
+          headers: this.getHeaders(),
+          params: { language },
+          timeout: 8000,
+        }),
+      );
+      return { found: true, data: response.data };
+    } catch (error: any) {
+      if (error?.response?.status === 404) {
+        return { found: false };
+      }
+      this.logger.warn(
+        `TMDb optional details lookup failed for ${tmdbId}: ${error?.message ?? 'unknown error'}`,
+      );
+      return { found: false, failed: true };
+    }
+  }
+
   async searchMovies(
     query: string,
     year?: number,
